@@ -114,11 +114,6 @@ func (s *Server) retrieveData(ctx context.Context, stream pb.PieceStoreRoutes_Re
 			if lastAllocation == nil {
 				return
 			}
-			err := s.DB.WriteBandwidthAllocToDB(lastAllocation)
-			if err != nil {
-				// TODO: handle error properly
-				s.log.Error("WriteBandwidthAllocToDB Error:", zap.Error(err))
-			}
 		}()
 
 		for {
@@ -151,6 +146,13 @@ func (s *Server) retrieveData(ctx context.Context, stream pb.PieceStoreRoutes_Re
 
 			if err = allocationTracking.Produce(allocData.GetTotal() - lastTotal); err != nil {
 				return
+			}
+
+			// Hack the planet. Why should we only submit the lastAlloc? Lets take them all cause they all contain a valid signature.
+			err = s.DB.WriteBandwidthAllocToDB(alloc)
+			if err != nil {
+				// TODO: handle error properly
+				s.log.Error("WriteBandwidthAllocToDB Error:", zap.Error(err))
 			}
 
 			lastAllocation = alloc
